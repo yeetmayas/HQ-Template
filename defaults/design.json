@@ -1,0 +1,36 @@
+{
+  "about": "Design tokens for your dashboard. Edit any value and the open page restyles itself. Never pure black or white.",
+  "color": {
+    "light": {
+      "ground": "#F2F1EC",
+      "surface": "#FBFAF7",
+      "ink": "#1C1B19",
+      "muted": "#5F5D58",
+      "line": "#E4E2DC",
+      "good": "#2F7D4F",
+      "warning": "#B7791F",
+      "critical": "#B3392E",
+      "info": "#3460B8"
+    },
+    "dark": {
+      "ground": "#151513",
+      "surface": "#1F1E1B",
+      "ink": "#EDEBE6",
+      "muted": "#A29F98",
+      "line": "#34322E",
+      "good": "#5DB07F",
+      "warning": "#D9A045",
+      "critical": "#E06B5F",
+      "info": "#7C9DE8"
+    }
+  },
+  "type": {
+    "family": "system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+    "mono": "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+    "scale": [13, 15, 17, 22, 28],
+    "numbers": "tabular-nums"
+  },
+  "space": { "grid": 4 },
+  "radius": 10,
+  "target": 44
+}

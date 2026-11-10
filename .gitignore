@@ -1,0 +1,8 @@
+# Your data never goes in the template repo. It lives in data/ (or wherever --data / HQ_DATA
+# points) with its own local git history and no remote.
+/data/
+
+# Mac and editor clutter
+.DS_Store
+*.tmp
+node_modules/

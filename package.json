@@ -1,0 +1,12 @@
+{
+  "name": "hq-template",
+  "version": "0.1.0",
+  "description": "A personal project dashboard that runs on your own computer and works with any AI.",
+  "license": "MIT",
+  "private": true,
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node server/hq.js",
+    "test": "node --test"
+  }
+}
