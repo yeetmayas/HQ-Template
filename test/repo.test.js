@@ -20,7 +20,7 @@ test('package.json declares no dependencies of any kind', () => {
 });
 
 test('every require() in the server and the shared format is built into Node or a local file', () => {
-  const files = ['server/hq.js', 'app/format.js'];
+  const files = ['server/hq.js', 'app/format.js', 'app/logic.js'];
   const builtin = new Set(builtinModules);
   for (const f of files) {
     const src = fs.readFileSync(path.join(ROOT, f), 'utf8');

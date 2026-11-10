@@ -199,3 +199,82 @@ test('`node server/hq.js` prints the link, and the link works', async () => {
     child.kill('SIGINT');
   }
 });
+
+/* ---------- phase 2: every status transition through the server ---------- */
+
+const readTicket = (data, id) => fs.readFileSync(path.join(data, 'projects', EXAMPLE_SLUG, 'tickets', `${id}.md`), 'utf8');
+async function act(port, id, what, body) {
+  const { json } = await request(port, 'GET', `/api/tickets/${EXAMPLE_SLUG}/${id}`);
+  return request(port, 'POST', `/api/tickets/${EXAMPLE_SLUG}/${id}/${what}`, { ...body, version: json.version });
+}
+
+test('transitions: open → answered → (edit) answered → (cancel, quiet) open', async () => {
+  await withServer(async ({ port, data }) => {
+    let r = await act(port, 'T-005', 'answer', { choice: 'yes' });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.ticket.status, 'answered');
+    assert.equal(r.json.ticket.rubric[1].done, true, 'the "(you) Confirmed" check is ticked by answering');
+    r = await act(port, 'T-005', 'answer', { choice: 'no', answer: 'Under €70.' });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(git(data, 'log', '-1', '--format=%s'), 'Edit answer T-005 (I read this as: "cheap" means under €80 a night): No, I meant something else');
+    r = await act(port, 'T-005', 'cancel', {});
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.undo, 'none');
+    const t = r.json.ticket;
+    assert.equal(t.status, 'open');
+    assert.equal(t.choice, '');
+    assert.equal(t.rubric[1].done, false);
+    assert.match(readTicket(data, 'T-005'), /^cancelled:\n {2}- at: \d{4}-\d\d-\d\d \| label: No, I meant something else \| choice: no \| was: answered \| undo: none$/m);
+    assert.doesNotMatch(fs.readFileSync(path.join(data, 'projects', EXAMPLE_SLUG, 'log.md'), 'utf8'), /T-005/, 'nothing to log: the AI never saw it');
+    assert.match(git(data, 'log', '-1', '--format=%s'), /^Cancel T-005 /);
+  });
+});
+
+test('transitions: done → (untick) verify → (tick) done → (cancel) open, with an undo for the AI and a log line', async () => {
+  await withServer(async ({ port, data }) => {
+    let r = await act(port, 'T-001', 'rubric', { index: 3, done: false });
+    assert.equal(r.json.ticket.status, 'verify');
+    assert.equal(r.json.change, 'reopened');
+    r = await act(port, 'T-001', 'rubric', { index: 3, done: true });
+    assert.equal(r.json.ticket.status, 'done');
+    assert.equal(git(data, 'log', '-1', '--format=%s'), 'T-001: ticked "Checked the log entry says what I meant"; T-001 is done');
+    r = await act(port, 'T-001', 'cancel', {});
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.undo, 'pending');
+    assert.equal(r.json.ticket.status, 'open');
+    const log = fs.readFileSync(path.join(data, 'projects', EXAMPLE_SLUG, 'log.md'), 'utf8');
+    assert.match(log, /- \d{4}-\d\d-\d\d · T-001 · Cancelled "The coast" \(was done\)\. The AI undoes what it changed\.\n$/);
+    assert.equal(git(data, 'show', '--name-only', '--format=', 'HEAD'), `projects/${EXAMPLE_SLUG}/log.md\nprojects/${EXAMPLE_SLUG}/tickets/T-001.md`, 'ticket and log in one commit');
+    // T-002 needed T-001: with T-001 open again, T-002 still holds an answer, but would lock if reopened
+    const s = (await request(port, 'GET', '/api/state')).json;
+    assert.equal(ticketOf(s, 'T-001').status, 'open');
+    // answering again works straight away
+    r = await act(port, 'T-001', 'answer', { choice: 'hills' });
+    assert.equal(r.status, 200, r.text);
+    assert.match(readTicket(data, 'T-001'), /undo: pending/, 'the earlier cancel stays on record for the AI');
+  });
+});
+
+test('transitions made by the AI in the files (answered → verify, open → working) show up in the state', async () => {
+  await withServer(async ({ port, data }) => {
+    const f = path.join(data, 'projects', EXAMPLE_SLUG, 'tickets', 'T-002.md');
+    fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replace('status: answered', 'status: verify').replace('- [ ] (AI) Recorded in the log', '- [x] (AI) Recorded in the log'));
+    let s = (await request(port, 'GET', '/api/state')).json;
+    assert.equal(ticketOf(s, 'T-002').status, 'verify');
+    // every check is ticked now, but closing is the user's move
+    assert.equal((await act(port, 'T-003', 'close', {})).status, 409, 'only Check it tickets close');
+    const r = await act(port, 'T-002', 'close', {});
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.ticket.status, 'done');
+    assert.equal(git(data, 'log', '-1', '--format=%s'), 'T-002 is done (Which weekend?)');
+    s = (await request(port, 'GET', '/api/state')).json;
+    assert.equal(ticketOf(s, 'T-002').status, 'done');
+  });
+});
+
+test('state includes each project\'s decision log', async () => {
+  await withServer(async ({ port }) => {
+    const s = (await request(port, 'GET', '/api/state')).json;
+    assert.deepEqual(s.projects[0].log.map((e) => e.ticket), ['T-001']);
+  });
+});

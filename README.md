@@ -3,7 +3,7 @@
 One dashboard for all your projects. It runs on your own computer, keeps everything in plain
 files, and works with any AI.
 
-> Status: phase 1 of 6 (files and server). The full dashboard arrives in phase 2.
+> Status: phase 2 of 6 (dashboard core). Charts, theming and dark mode arrive in phase 3.
 
 ## Run it
 

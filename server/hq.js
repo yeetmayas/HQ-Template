@@ -24,6 +24,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { execFile } = require('node:child_process');
 const F = require('../app/format.js');
+const L = require('../app/logic.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const APP = path.join(ROOT, 'app');
@@ -92,6 +93,8 @@ async function listProjects(dataDir) {
 }
 
 const byIdNumber = (a, b) => a.localeCompare(b, 'en', { numeric: true });
+// Today's date on this computer, as YYYY-MM-DD.
+const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 
 /* ---------- local history: a git repo inside the data folder, never pushed ---------- */
 
@@ -236,7 +239,8 @@ async function loadProject(dataDir, slug, rank) {
     t.visuals = F.visuals(t);
     t.warnings = t.error ? [t.error] : F.checkTicket(t, { fileId: path.basename(t.file, '.md'), phases, byId });
   }
-  return { slug, rank, ...project, tickets, byId, warnings };
+  const log = F.parseLog(await readText(path.join(dir, 'log.md'), ''));
+  return { slug, rank, ...project, tickets, log, byId, warnings };
 }
 
 async function loadState(dataDir) {
@@ -347,8 +351,10 @@ function createApp(opts) {
     if (body.version !== version(raw)) throw new HttpError(409, 'This ticket changed on disk since you opened it (perhaps your AI edited it). Reload it and try again.', { version: version(raw) });
   }
 
-  async function save(file, text, message) {
+  // Write one or more files, then make one local commit for the lot.
+  async function save(file, text, message, more) {
     await writeAtomic(file, text);
+    for (const [f, t] of more || []) await writeAtomic(f, t);
     let history;
     try { history = await git.commit(message); } catch (e) { history = { committed: false, error: (e.stderr || e.message || '').trim() }; }
     return history;
@@ -381,41 +387,59 @@ function createApp(opts) {
       return { ok: true, version: version(body.raw), history };
     }],
 
-    // Save the user's answer: a choice (one of the option keys) and/or their own words.
+    // Save your answer: a choice (one of the option keys) and/or your own words.
     ['POST', /^\/api\/tickets\/([^/]+)\/([^/]+)\/answer$/, async (req, [slug, id]) => {
       const body = await readJson(req);
       const { file, raw } = await readTicketFile(slug, id);
       checkVersion(raw, body);
       const t = F.parseTicket(raw);
-      if (t.status !== 'open' && t.status !== 'answered') {
-        throw new HttpError(409, `${id} is "${t.status}", so it can't be answered now. Only open tickets can be answered (or answered ones edited).`);
-      }
       const p = await loadProject(dataDir, slug, 0);
-      if (F.isLocked(t, p.byId)) throw new HttpError(409, `${id} is locked until ${t.needs.join(', ')} ${t.needs.length > 1 ? 'are' : 'is'} answered or done.`);
-      const choice = typeof body.choice === 'string' ? body.choice.trim() : '';
-      const answer = typeof body.answer === 'string' ? body.answer : '';
-      if (choice && !t.options.some((o) => o.key === choice)) throw new HttpError(400, `"${choice}" isn't one of ${id}'s options (${t.options.map((o) => o.key).join(', ')}).`);
-      if (!choice && !answer.trim()) throw new HttpError(400, t.options.length ? 'Pick an option or write an answer.' : 'Write an answer.');
-      const next = F.setSection({ ...t, choice, status: 'answered' }, 'Answer', answer);
+      const { next, label, edited } = L.answer(t, body, L.lockedBy(t, p.byId), today());
       const text = F.serializeTicket(next);
-      const what = choice ? F.optionLabel(t, choice) : answer.trim().split('\n')[0].slice(0, 72);
-      const history = await save(file, text, `Answer ${id} (${t.title}): ${what}`);
+      const history = await save(file, text, `${edited ? 'Edit answer' : 'Answer'} ${id} (${t.title}): ${label}`);
       return { ok: true, version: version(text), history, ticket: await describeTicket(slug, id) };
     }],
 
-    // Tick or untick one rubric check (numbered from 0, in file order).
+    // Cancel your decision: the ticket goes back to open. If your AI had already seen it, the
+    // ticket records an undo for your AI and the project's log says so.
+    ['POST', /^\/api\/tickets\/([^/]+)\/([^/]+)\/cancel$/, async (req, [slug, id]) => {
+      const body = await readJson(req);
+      const { file, raw } = await readTicketFile(slug, id);
+      checkVersion(raw, body);
+      const { next, label, undo, logLine } = L.cancel(F.parseTicket(raw), today());
+      const text = F.serializeTicket(next);
+      const more = [];
+      if (logLine) {
+        const logFile = path.join(dataDir, 'projects', slug, 'log.md');
+        const old = await readText(logFile, `# Decision log\n`);
+        more.push([logFile, old.replace(/\s*$/, '\n') + logLine + '\n']);
+      }
+      const history = await save(file, text, `Cancel ${id} (${next.title}): ${label}`, more);
+      return { ok: true, version: version(text), undo, history, ticket: await describeTicket(slug, id) };
+    }],
+
+    // Close a Check it ticket whose checks are all ticked.
+    ['POST', /^\/api\/tickets\/([^/]+)\/([^/]+)\/close$/, async (req, [slug, id]) => {
+      const body = await readJson(req);
+      const { file, raw } = await readTicketFile(slug, id);
+      checkVersion(raw, body);
+      const { next } = L.close(F.parseTicket(raw));
+      const text = F.serializeTicket(next);
+      const history = await save(file, text, `${id} is done (${next.title})`);
+      return { ok: true, version: version(text), history, ticket: await describeTicket(slug, id) };
+    }],
+
+    // Tick or untick one rubric check (numbered from 0, in file order). Ticking the last check of
+    // a "Check it" ticket closes it; unticking one on a done ticket reopens it.
     ['POST', /^\/api\/tickets\/([^/]+)\/([^/]+)\/rubric$/, async (req, [slug, id]) => {
       const body = await readJson(req);
       const { file, raw } = await readTicketFile(slug, id);
       checkVersion(raw, body);
-      const t = F.parseTicket(raw);
-      if (!Number.isInteger(body.index) || typeof body.done !== 'boolean') throw new HttpError(400, 'Send "index" (a number) and "done" (true or false).');
-      let next;
-      try { next = F.setRubric(t, body.index, body.done); } catch (e) { throw new HttpError(400, e.message); }
+      const { next, check, change } = L.tickRubric(F.parseTicket(raw), body.index, body.done);
       const text = F.serializeTicket(next);
-      const check = F.rubric(next)[body.index];
-      const history = await save(file, text, `${id}: ${body.done ? 'ticked' : 'unticked'} "${check.text}"`);
-      return { ok: true, version: version(text), history, ticket: await describeTicket(slug, id) };
+      const tail = change === 'closed' ? `; ${id} is done` : change === 'reopened' ? `; ${id} back to Check it` : '';
+      const history = await save(file, text, `${id}: ${body.done ? 'ticked' : 'unticked'} "${check.text}"${tail}`);
+      return { ok: true, version: version(text), change, history, ticket: await describeTicket(slug, id) };
     }],
   ];
 
@@ -465,6 +489,7 @@ function createApp(opts) {
           return send(res, 200, await fn(req, m.slice(1).map(decodeURIComponent)));
         } catch (e) {
           if (e instanceof HttpError) return send(res, e.status, { error: e.message, ...(e.extra || {}) });
+          if (e instanceof L.Refused) return send(res, e.status, { error: e.message });
           console.error(e);
           return send(res, 500, { error: 'Something went wrong on the server. See the terminal.' });
         }
